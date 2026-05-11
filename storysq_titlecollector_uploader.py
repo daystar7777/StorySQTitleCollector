@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -12,6 +13,8 @@ from typing import Any, Dict, Tuple
 ROOT = Path(__file__).resolve().parent
 PROMPT_PATH = ROOT / "prompts" / "titlecollector.m1.md"
 DEFAULT_DASHBOARD = ROOT.parent / "StorySQ_Content" / "Content_Dashboard"
+DEFAULT_ENV_FILE = ROOT / ".env"
+TARGET_ENV_KEY = "STORYSQ_DASHBOARD_TARGET"
 
 
 def canonical_json(value: Any) -> str:
@@ -20,6 +23,19 @@ def canonical_json(value: Any) -> str:
 
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def load_env_file(path: Path) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+    values: Dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
 def protocol_manifest_hash() -> str:
@@ -273,7 +289,8 @@ def run_self_test(args: argparse.Namespace) -> Dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="StorySQ TitleCollector M1 uploader/connector")
     parser.add_argument("--dashboard-root", default=str(DEFAULT_DASHBOARD))
-    parser.add_argument("--target", help="Dashboard gRPC target, e.g. 127.0.0.1:50051")
+    parser.add_argument("--target", help=f"Dashboard gRPC target. Defaults to {TARGET_ENV_KEY} from .env or environment.")
+    parser.add_argument("--env-file", default=str(DEFAULT_ENV_FILE), help="Local env file for Dashboard target configuration")
     parser.add_argument("--self-test", action="store_true", help="Start an in-process Dashboard gRPC server and run one attach")
     parser.add_argument("--mode", choices=["fixture", "production"], default="production")
     parser.add_argument("--worker-id", default="storysq_titlecollector_m1")
@@ -294,7 +311,10 @@ def main() -> int:
         return 0
 
     if not args.target:
-        parser.error("--target is required unless --self-test or --print-envelope is used")
+        env_values = load_env_file(Path(args.env_file))
+        args.target = os.environ.get(TARGET_ENV_KEY) or env_values.get(TARGET_ENV_KEY)
+    if not args.target:
+        parser.error(f"--target or {TARGET_ENV_KEY} in .env is required unless --self-test or --print-envelope is used")
 
     grpc, _, pb_api = import_dashboard(Path(args.dashboard_root))
     pb2, pb2_grpc = pb_api
