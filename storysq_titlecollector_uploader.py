@@ -9,6 +9,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
@@ -16,6 +18,7 @@ PROMPT_PATH = ROOT / "prompts" / "titlecollector.m1.md"
 DEFAULT_DASHBOARD = ROOT.parent / "StorySQ_Content" / "Content_Dashboard"
 DEFAULT_ENV_FILE = ROOT / ".env"
 TARGET_ENV_KEY = "STORYSQ_DASHBOARD_TARGET"
+HTTP_USER_AGENT = "StorySQTitleCollector/1.0"
 
 
 def canonical_json(value: Any) -> str:
@@ -387,6 +390,66 @@ def normalize_target(target: str) -> Tuple[str, bool]:
     return target, False
 
 
+def target_is_http(target: str) -> bool:
+    return target.startswith("http://") or target.startswith("https://")
+
+
+def join_url(base: str, path: str) -> str:
+    return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+def post_json(base_url: str, path: str, payload: Dict[str, Any], timeout: float) -> Tuple[int, Dict[str, Any]]:
+    body = json.dumps(payload, sort_keys=True).encode("utf-8")
+    request = Request(
+        join_url(base_url, path),
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+        return response.status, json.loads(raw) if raw else {}
+
+
+def submit_to_http_target(
+    target: str,
+    submission: Dict[str, Any],
+    manifest: Dict[str, Any],
+    lease_req: Dict[str, Any],
+    timeout: float,
+) -> Dict[str, Any]:
+    try:
+        _, registration = post_json(target, "/workers/register", {"manifest": manifest}, timeout)
+        if registration.get("state") != "active":
+            return {"registered": registration.get("state", "failed"), "reason": registration.get("reason", "")}
+        worker_id = registration["worker_id"]
+        _, heartbeat = post_json(target, "/workers/heartbeat", {"worker_id": worker_id}, timeout)
+        _, lease = post_json(target, "/leases/title-slice", {"worker_id": worker_id, "request": lease_req}, timeout)
+        submission["payload"]["lease_id"] = lease["lease_id"]
+        submission["payload"]["source_worker_id"] = worker_id
+        status, ingest = post_json(target, "/connector-submissions", submission, timeout)
+        return {
+            "transport": "https-json" if target.startswith("https://") else "http-json",
+            "registered": registration.get("state"),
+            "heartbeat": heartbeat.get("state"),
+            "lease": lease.get("state"),
+            "submission": ingest.get("state"),
+            "bundle_id": ingest.get("bundle_id", ""),
+            "event_id": ingest.get("event_id", ""),
+            "http_status": status,
+            "mode": submission["mode"],
+        }
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return {"transport": "http-json", "submission": "failed", "http_status": exc.code, "reason": detail}
+    except (URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+        return {"transport": "http-json", "submission": "failed", "reason": str(exc)}
+
+
 def submit_to_target(
     target: str,
     submission: Dict[str, Any],
@@ -398,6 +461,8 @@ def submit_to_target(
     use_tls: bool = False,
     rpc_timeout: float = 10.0,
 ) -> Dict[str, str]:
+    if target_is_http(target):
+        return submit_to_http_target(target, submission, manifest, lease_req, rpc_timeout)
     target, scheme_tls = normalize_target(target)
     if use_tls or scheme_tls:
         channel = grpc.secure_channel(target, grpc.ssl_channel_credentials())
