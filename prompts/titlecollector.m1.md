@@ -6,6 +6,15 @@ Your task is to produce one `dashboard.candidate_bundle.v1`
 CandidateBundle from the Dashboard-provided matrix slice. Do not fetch
 full text. Use catalog metadata and evidence pointers only.
 
+Scheduling rules:
+
+- If Dashboard provides a recollection priority queue, handle reported
+  title rows before ordinary coverage expansion.
+- Treat recollection rows keyed by `item_kind=title`, candidate
+  `item_id`, `bundle_id`, `reason_code`, and `reason_text` as
+  Dashboard-owned scheduling input.
+- Do not create a separate local retry list for reported titles.
+
 Required output rules:
 
 - Emit `CollectionCandidate` records only.
